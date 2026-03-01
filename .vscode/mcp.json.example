@@ -1,0 +1,41 @@
+{
+  "servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "./"
+      ]
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ]
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${env:GITHUB_TOKEN}"
+      }
+    },
+    "mapbox": {
+      "command": "<your-mapbox-mcp-command>",
+      "args": [],
+      "env": {
+        "MAPBOX_ACCESS_TOKEN": "${env:VITE_MAPBOX_ACCESS_TOKEN}"
+      }
+    },
+    "anaheim-figma-make": {
+      "command": "node",
+      "args": [
+        "mcp-server/index.js"
+      ]
+    }
+  }
+}
