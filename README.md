@@ -32,7 +32,14 @@ You'll learn how to:
 - Click the `+` button in the bottom-left Community Events bar to open the add-event form.
 - Added events are geocoded through Mapbox and placed on the map as category-based markers.
 - Clicking a marker zooms and centers the map on that event and opens the event info card in the left panel.
-- Event data is stored in browser `localStorage` under the `communityEvents` key (no backend persistence yet).
+- Event data is stored in MongoDB via a local Express API (`api-server/index.js`).
+
+## Event API (MongoDB)
+
+- Set `MONGODB_URI` and other API env vars in `.env` (see `.env.example`).
+- Start API server: `npm run api:dev` (defaults to `http://localhost:4000`).
+- Start frontend: `npm run dev`.
+- Frontend reads/writes events through `VITE_API_BASE_URL`.
 
 ## AI Agents and MCP Servers
 

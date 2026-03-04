@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import mapboxgl from 'mapbox-gl'
+import PartySocket from 'partysocket'
+import { SearchBox } from '@mapbox/search-js-react'
 import { MaterialSymbol } from './components/MaterialSymbol'
 
 import 'mapbox-gl/dist/mapbox-gl.css'
 import './App.css'
 
 const accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN
+const partykitHost = import.meta.env.VITE_PARTYKIT_HOST || 'localhost:1999'
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000'
 const defaultCenter = [-117.9143, 33.8353]
-const localStorageKey = 'communityEvents'
 
 const categoryOptions = [
   'Free Community Events',
@@ -31,6 +34,15 @@ const categoryIconMap = {
   'Free Community Events': 'groups'
 }
 
+const minMarkerSize = 16
+const maxMarkerSize = 32
+const zoomForMinSize = 8
+const zoomForMaxSize = 16
+const clusterStartSize = 20
+const clusterStartZoom = 10.8
+const fallbackPresenceColors = ['#f44336', '#3f51b5', '#4caf50', '#ff9800', '#9c27b0', '#00acc1', '#8bc34a']
+const presenceIconOptions = ['mouse', 'person', 'boy', 'girl']
+
 const emptyForm = {
   name: '',
   description: '',
@@ -44,30 +56,31 @@ const emptyForm = {
   coverPicture: ''
 }
 
-const readEventsFromStorage = () => {
-  try {
-    const rawValue = localStorage.getItem(localStorageKey)
-    if (!rawValue) {
-      return []
-    }
+const fetchEventsFromApi = async () => {
+  const response = await fetch(`${apiBaseUrl}/events`)
 
-    const parsed = JSON.parse(rawValue)
-    if (!Array.isArray(parsed)) {
-      return []
-    }
-
-    return parsed.filter((eventItem) => {
-      return (
-        typeof eventItem?.id === 'string' &&
-        typeof eventItem?.name === 'string' &&
-        typeof eventItem?.location === 'string' &&
-        typeof eventItem?.lng === 'number' &&
-        typeof eventItem?.lat === 'number'
-      )
-    })
-  } catch {
-    return []
+  if (!response.ok) {
+    throw new Error('Unable to load events from database')
   }
+
+  const payload = await response.json()
+  return Array.isArray(payload) ? payload : []
+}
+
+const createEventInApi = async (eventPayload) => {
+  const response = await fetch(`${apiBaseUrl}/events`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(eventPayload)
+  })
+
+  if (!response.ok) {
+    throw new Error('Unable to save event to database')
+  }
+
+  return response.json()
 }
 
 const geocodeLocation = async (query) => {
@@ -93,19 +106,103 @@ const geocodeLocation = async (query) => {
   }
 }
 
+const clamp = (value, min, max) => {
+  return Math.max(min, Math.min(max, value))
+}
+
+const getMarkerSizeByZoom = (zoom) => {
+  const ratio = (zoom - zoomForMinSize) / (zoomForMaxSize - zoomForMinSize)
+  return clamp(minMarkerSize + ratio * (maxMarkerSize - minMarkerSize), minMarkerSize, maxMarkerSize)
+}
+
+const getClusterThresholdBySize = (markerSize) => {
+  return clamp(markerSize * 1.45, 24, 40)
+}
+
+const createProximityGroups = (events, map, thresholdPixels) => {
+  const projectedPoints = events.map((eventItem) => ({
+    eventItem,
+    point: map.project([eventItem.lng, eventItem.lat])
+  }))
+
+  const visited = new Array(projectedPoints.length).fill(false)
+  const groups = []
+
+  for (let index = 0; index < projectedPoints.length; index += 1) {
+    if (visited[index]) {
+      continue
+    }
+
+    const queue = [index]
+    visited[index] = true
+    const memberIndices = []
+
+    while (queue.length > 0) {
+      const currentIndex = queue.shift()
+      memberIndices.push(currentIndex)
+
+      for (let candidateIndex = 0; candidateIndex < projectedPoints.length; candidateIndex += 1) {
+        if (visited[candidateIndex]) {
+          continue
+        }
+
+        const dx = projectedPoints[currentIndex].point.x - projectedPoints[candidateIndex].point.x
+        const dy = projectedPoints[currentIndex].point.y - projectedPoints[candidateIndex].point.y
+        const distance = Math.sqrt(dx * dx + dy * dy)
+
+        if (distance <= thresholdPixels) {
+          visited[candidateIndex] = true
+          queue.push(candidateIndex)
+        }
+      }
+    }
+
+    groups.push(memberIndices.map((memberIndex) => projectedPoints[memberIndex].eventItem))
+  }
+
+  return groups
+}
+
+const getFallbackColorForParticipant = (participantId) => {
+  if (!participantId) {
+    return fallbackPresenceColors[0]
+  }
+
+  let hash = 0
+  for (let index = 0; index < participantId.length; index += 1) {
+    hash = (hash * 31 + participantId.charCodeAt(index)) | 0
+  }
+
+  return fallbackPresenceColors[Math.abs(hash) % fallbackPresenceColors.length]
+}
+
 function App() {
   const mapRef = useRef(null)
   const markersRef = useRef([])
+  const presenceMarkersRef = useRef([])
+  const presenceSocketRef = useRef(null)
+  const selectedPresenceIconRef = useRef('person')
+  const iconMenuRef = useRef(null)
+  const longPressTimerRef = useRef(null)
+  const lastPresencePointRef = useRef({ lng: defaultCenter[0], lat: defaultCenter[1] })
+  const lastPresenceSentAtRef = useRef(0)
   const mapContainerRef = useRef(null)
 
   const [searchValue, setSearchValue] = useState('')
   const [activeCategory, setActiveCategory] = useState(null)
-  const [events, setEvents] = useState(() => readEventsFromStorage())
+  const [events, setEvents] = useState([])
+  const [eventsLoadError, setEventsLoadError] = useState('')
+  const [participants, setParticipants] = useState([])
+  const [selfParticipantId, setSelfParticipantId] = useState(null)
+  const [selectedPresenceIcon, setSelectedPresenceIcon] = useState('person')
+  const [presenceHint, setPresenceHint] = useState({ visible: false, x: 0, y: 0, text: '' })
+  const [iconMenuState, setIconMenuState] = useState({ open: false, x: 0, y: 0 })
   const [selectedEventId, setSelectedEventId] = useState(null)
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
   const [formValues, setFormValues] = useState(emptyForm)
+  const [selectedLocationCoordinates, setSelectedLocationCoordinates] = useState(null)
 
   const selectedEvent = useMemo(() => {
     return events.find((eventItem) => eventItem.id === selectedEventId) || null
@@ -134,6 +231,62 @@ function App() {
   const areChipsCollapsed = isFormOpen || Boolean(selectedEvent)
 
   useEffect(() => {
+    selectedPresenceIconRef.current = selectedPresenceIcon
+  }, [selectedPresenceIcon])
+
+  useEffect(() => {
+    if (!iconMenuState.open) {
+      return
+    }
+
+    const onPointerDown = (eventTarget) => {
+      if (!iconMenuRef.current || iconMenuRef.current.contains(eventTarget.target)) {
+        return
+      }
+
+      setIconMenuState((previousState) => ({
+        ...previousState,
+        open: false
+      }))
+    }
+
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [iconMenuState.open])
+
+  useEffect(() => {
+    if (selectedEventId && !visibleEvents.some((eventItem) => eventItem.id === selectedEventId)) {
+      setSelectedEventId(null)
+    }
+  }, [selectedEventId, visibleEvents])
+
+  useEffect(() => {
+    let isCancelled = false
+
+    const loadEvents = async () => {
+      try {
+        const storedEvents = await fetchEventsFromApi()
+        if (!isCancelled) {
+          setEvents(storedEvents)
+          setEventsLoadError('')
+        }
+      } catch {
+        if (!isCancelled) {
+          setEventsLoadError('Unable to load events from MongoDB right now.')
+        }
+      }
+    }
+
+    loadEvents()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
     mapboxgl.accessToken = accessToken
 
     mapRef.current = new mapboxgl.Map({
@@ -148,59 +301,361 @@ function App() {
     return () => {
       markersRef.current.forEach((marker) => marker.remove())
       markersRef.current = []
+      presenceMarkersRef.current.forEach((marker) => marker.remove())
+      presenceMarkersRef.current = []
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current)
+        longPressTimerRef.current = null
+      }
+      presenceSocketRef.current?.close()
       mapRef.current?.remove()
     }
   }, [])
 
   useEffect(() => {
-    localStorage.setItem(localStorageKey, JSON.stringify(events))
-  }, [events])
+    const socket = new PartySocket({
+      host: partykitHost,
+      room: 'community-map-presence',
+      party: 'main'
+    })
+
+    presenceSocketRef.current = socket
+
+    socket.onmessage = (messageEvent) => {
+      try {
+        const payload = JSON.parse(messageEvent.data)
+
+        if (payload?.type !== 'presence') {
+          return
+        }
+
+        setSelfParticipantId(typeof payload.selfId === 'string' ? payload.selfId : null)
+        setParticipants(Array.isArray(payload.participants) ? payload.participants : [])
+      } catch {
+        // ignore malformed payloads
+      }
+    }
+
+    socket.onopen = () => {
+      if (!mapRef.current) {
+        return
+      }
+
+      const center = mapRef.current.getCenter()
+      lastPresencePointRef.current = { lng: center.lng, lat: center.lat }
+      socket.send(
+        JSON.stringify({
+          type: 'position',
+          lng: center.lng,
+          lat: center.lat,
+          icon: selectedPresenceIconRef.current
+        })
+      )
+    }
+
+    return () => {
+      socket.close()
+      if (presenceSocketRef.current === socket) {
+        presenceSocketRef.current = null
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!mapRef.current || !presenceSocketRef.current) {
+      return
+    }
+
+    const map = mapRef.current
+    const isTouchDevice = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0
+
+    const sendPosition = (lng, lat, force = false) => {
+      if (!presenceSocketRef.current || presenceSocketRef.current.readyState !== WebSocket.OPEN) {
+        return
+      }
+
+      const now = performance.now()
+      if (!force && now - lastPresenceSentAtRef.current < 60) {
+        return
+      }
+
+      lastPresenceSentAtRef.current = now
+      lastPresencePointRef.current = { lng, lat }
+
+      presenceSocketRef.current.send(
+        JSON.stringify({
+          type: 'position',
+          lng,
+          lat,
+          icon: selectedPresenceIconRef.current
+        })
+      )
+    }
+
+    const publishMapCenter = (force = false) => {
+      const center = map.getCenter()
+      sendPosition(center.lng, center.lat, force)
+    }
+
+    const onMouseMove = (eventTarget) => {
+      sendPosition(eventTarget.lngLat.lng, eventTarget.lngLat.lat)
+    }
+
+    const onTouchMove = () => {
+      publishMapCenter()
+    }
+
+    const onDesktopMoveEnd = () => {
+      publishMapCenter()
+    }
+
+    if (isTouchDevice) {
+      map.on('move', onTouchMove)
+      map.on('moveend', onTouchMove)
+      publishMapCenter(true)
+    } else {
+      map.on('mousemove', onMouseMove)
+      map.on('moveend', onDesktopMoveEnd)
+      publishMapCenter(true)
+    }
+
+    return () => {
+      if (isTouchDevice) {
+        map.off('move', onTouchMove)
+        map.off('moveend', onTouchMove)
+      } else {
+        map.off('mousemove', onMouseMove)
+        map.off('moveend', onDesktopMoveEnd)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!presenceSocketRef.current || presenceSocketRef.current.readyState !== WebSocket.OPEN) {
+      return
+    }
+
+    const latestPoint = lastPresencePointRef.current
+    presenceSocketRef.current.send(
+      JSON.stringify({
+        type: 'position',
+        lng: latestPoint.lng,
+        lat: latestPoint.lat,
+        icon: selectedPresenceIcon
+      })
+    )
+  }, [selectedPresenceIcon])
 
   useEffect(() => {
     if (!mapRef.current) {
       return
     }
 
-    markersRef.current.forEach((marker) => marker.remove())
-    markersRef.current = []
+    const map = mapRef.current
 
-    visibleEvents.forEach((eventItem) => {
-      const markerElement = document.createElement('button')
-      markerElement.className = `event-marker ${eventItem.id === selectedEventId ? 'is-selected' : ''}`
-      markerElement.type = 'button'
-      markerElement.setAttribute('aria-label', `${eventItem.category} marker`)
-      markerElement.innerHTML = `<span class="material-symbols-outlined event-marker-icon">${categoryIconMap[eventItem.category] || 'location_on'}</span>`
+    presenceMarkersRef.current.forEach((marker) => marker.remove())
+    presenceMarkersRef.current = []
 
-      const popupContent = document.createElement('div')
-      popupContent.className = 'event-popup'
+    participants.forEach((participant) => {
+      if (typeof participant?.lng !== 'number' || typeof participant?.lat !== 'number') {
+        return
+      }
 
-      const title = document.createElement('strong')
-      title.textContent = eventItem.name
-      popupContent.appendChild(title)
+      const markerElement = document.createElement('div')
+      markerElement.className = `presence-marker ${participant.id === selfParticipantId ? 'is-self' : ''}`
+      markerElement.style.backgroundColor = participant.color || getFallbackColorForParticipant(participant.id)
+      markerElement.setAttribute('aria-label', 'Active user')
+      markerElement.innerHTML = `<span class="material-symbols-outlined presence-marker-icon">${participant.icon || 'person'}</span>`
 
-      const locationLine = document.createElement('p')
-      locationLine.textContent = eventItem.location
-      popupContent.appendChild(locationLine)
+      if (participant.id === selfParticipantId) {
+        const point = map.project([participant.lng, participant.lat])
 
-      const dateTimeLine = document.createElement('p')
-      dateTimeLine.textContent = `${eventItem.date || 'Date TBD'} ${eventItem.time || ''}`.trim()
-      popupContent.appendChild(dateTimeLine)
+        const openHint = (text, x, y) => {
+          setPresenceHint({
+            visible: true,
+            x,
+            y,
+            text
+          })
+        }
 
-      const popup = new mapboxgl.Popup({ offset: 25 }).setDOMContent(popupContent)
+        const closeHint = () => {
+          setPresenceHint((previousState) => ({
+            ...previousState,
+            visible: false
+          }))
+        }
+
+        markerElement.addEventListener('mouseenter', () => {
+          openHint('Right click to change icon', point.x, point.y - 18)
+        })
+
+        markerElement.addEventListener('mouseleave', () => {
+          closeHint()
+        })
+
+        markerElement.addEventListener('contextmenu', (eventTarget) => {
+          eventTarget.preventDefault()
+          closeHint()
+          setIconMenuState({
+            open: true,
+            x: eventTarget.clientX,
+            y: eventTarget.clientY
+          })
+        })
+
+        markerElement.addEventListener('touchstart', (eventTarget) => {
+          const touchPoint = eventTarget.touches?.[0]
+          if (!touchPoint) {
+            return
+          }
+
+          openHint('Long press to change icon', touchPoint.clientX, touchPoint.clientY - 20)
+
+          if (longPressTimerRef.current) {
+            clearTimeout(longPressTimerRef.current)
+          }
+
+          longPressTimerRef.current = setTimeout(() => {
+            closeHint()
+            setIconMenuState({
+              open: true,
+              x: touchPoint.clientX,
+              y: touchPoint.clientY
+            })
+            longPressTimerRef.current = null
+          }, 550)
+        })
+
+        const cancelLongPress = () => {
+          if (longPressTimerRef.current) {
+            clearTimeout(longPressTimerRef.current)
+            longPressTimerRef.current = null
+          }
+
+          setTimeout(() => {
+            closeHint()
+          }, 600)
+        }
+
+        markerElement.addEventListener('touchend', cancelLongPress)
+        markerElement.addEventListener('touchcancel', cancelLongPress)
+      }
 
       const marker = new mapboxgl.Marker({ element: markerElement, anchor: 'center' })
-        .setLngLat([eventItem.lng, eventItem.lat])
-        .setPopup(popup)
-        .addTo(mapRef.current)
+        .setLngLat([participant.lng, participant.lat])
+        .addTo(map)
 
-      markerElement.addEventListener('click', () => {
-        setSelectedEventId(eventItem.id)
-        setIsFormOpen(false)
-        mapRef.current?.flyTo({ center: [eventItem.lng, eventItem.lat], zoom: 13.8 })
-      })
-
-      markersRef.current.push(marker)
+      presenceMarkersRef.current.push(marker)
     })
+  }, [participants, selfParticipantId])
+
+  useEffect(() => {
+    if (!mapRef.current) {
+      return
+    }
+
+    const map = mapRef.current
+
+    const renderMarkers = () => {
+      markersRef.current.forEach((marker) => marker.remove())
+      markersRef.current = []
+
+      const currentZoom = map.getZoom()
+      const currentMarkerSize = getMarkerSizeByZoom(currentZoom)
+      const clusteringEnabled = currentMarkerSize <= clusterStartSize || currentZoom <= clusterStartZoom
+      const proximityThreshold = getClusterThresholdBySize(currentMarkerSize)
+      const groups = clusteringEnabled
+        ? createProximityGroups(visibleEvents, map, proximityThreshold)
+        : visibleEvents.map((eventItem) => [eventItem])
+
+      groups.forEach((group) => {
+        if (group.length === 1) {
+          const eventItem = group[0]
+          const markerElement = document.createElement('button')
+          markerElement.className = `event-marker ${eventItem.id === selectedEventId ? 'is-selected' : ''}`
+          markerElement.type = 'button'
+          markerElement.style.width = `${currentMarkerSize}px`
+          markerElement.style.height = `${currentMarkerSize}px`
+          markerElement.setAttribute('aria-label', `${eventItem.category} marker`)
+          markerElement.innerHTML = `<span class="material-symbols-outlined event-marker-icon" style="font-size:${Math.round(
+            currentMarkerSize * 0.72
+          )}px">${categoryIconMap[eventItem.category] || 'location_on'}</span>`
+
+          const popupContent = document.createElement('div')
+          popupContent.className = 'event-popup'
+
+          const title = document.createElement('strong')
+          title.textContent = eventItem.name
+          popupContent.appendChild(title)
+
+          const locationLine = document.createElement('p')
+          locationLine.textContent = eventItem.location
+          popupContent.appendChild(locationLine)
+
+          const dateTimeLine = document.createElement('p')
+          dateTimeLine.textContent = `${eventItem.date || 'Date TBD'} ${eventItem.time || ''}`.trim()
+          popupContent.appendChild(dateTimeLine)
+
+          const popup = new mapboxgl.Popup({ offset: 25 }).setDOMContent(popupContent)
+
+          const marker = new mapboxgl.Marker({ element: markerElement, anchor: 'center' })
+            .setLngLat([eventItem.lng, eventItem.lat])
+            .setPopup(popup)
+            .addTo(map)
+
+          markerElement.addEventListener('click', () => {
+            setSelectedEventId(eventItem.id)
+            setIsFormOpen(false)
+            map.flyTo({ center: [eventItem.lng, eventItem.lat], zoom: 13.8 })
+          })
+
+          markersRef.current.push(marker)
+          return
+        }
+
+        const clusterElement = document.createElement('button')
+        clusterElement.className = 'event-marker event-cluster-marker'
+        clusterElement.type = 'button'
+        const clusterSize = clamp(currentMarkerSize + 8, 24, 36)
+        clusterElement.style.width = `${clusterSize}px`
+        clusterElement.style.height = `${clusterSize}px`
+        clusterElement.setAttribute('aria-label', `${group.length} events in this area`)
+        clusterElement.innerHTML = `<span class="event-cluster-count">${group.length}</span>`
+
+        const clusterLng = group.reduce((sum, eventItem) => sum + eventItem.lng, 0) / group.length
+        const clusterLat = group.reduce((sum, eventItem) => sum + eventItem.lat, 0) / group.length
+
+        const clusterMarker = new mapboxgl.Marker({ element: clusterElement, anchor: 'center' })
+          .setLngLat([clusterLng, clusterLat])
+          .addTo(map)
+
+        clusterElement.addEventListener('click', () => {
+          const bounds = new mapboxgl.LngLatBounds()
+          group.forEach((eventItem) => {
+            bounds.extend([eventItem.lng, eventItem.lat])
+          })
+
+          map.fitBounds(bounds, {
+            padding: 90,
+            maxZoom: 14
+          })
+        })
+
+        markersRef.current.push(clusterMarker)
+      })
+    }
+
+    renderMarkers()
+    map.on('zoom', renderMarkers)
+    map.on('moveend', renderMarkers)
+
+    return () => {
+      map.off('zoom', renderMarkers)
+      map.off('moveend', renderMarkers)
+      markersRef.current.forEach((marker) => marker.remove())
+      markersRef.current = []
+    }
   }, [visibleEvents, selectedEventId])
 
   const onChangeField = (fieldName, value) => {
@@ -227,6 +682,7 @@ function App() {
   const openForm = () => {
     setSelectedEventId(null)
     setFormError('')
+    setSelectedLocationCoordinates(null)
     setIsFormOpen(true)
   }
 
@@ -265,28 +721,35 @@ function App() {
     setIsSubmitting(true)
 
     try {
-      const locationResult = await geocodeLocation(formValues.location)
+      const locationResult = selectedLocationCoordinates
+        ? {
+            lng: selectedLocationCoordinates.lng,
+            lat: selectedLocationCoordinates.lat,
+            displayName: formValues.location
+          }
+        : await geocodeLocation(formValues.location)
 
       if (!locationResult) {
         setFormError('Could not find that location. Please use a more specific address.')
         return
       }
 
-      const eventId = `${Date.now()}`
       const newEvent = {
-        id: eventId,
         ...formValues,
         location: locationResult.displayName,
         lng: locationResult.lng,
         lat: locationResult.lat
       }
 
-      setEvents((previousEvents) => [...previousEvents, newEvent])
-      setSelectedEventId(eventId)
+      const savedEvent = await createEventInApi(newEvent)
+
+      setEvents((previousEvents) => [...previousEvents, savedEvent])
+      setSelectedEventId(savedEvent.id)
       setIsFormOpen(false)
       setFormValues(emptyForm)
+      setSelectedLocationCoordinates(null)
       setSearchValue('')
-      setActiveCategory(newEvent.category)
+      setActiveCategory(savedEvent.category)
 
       mapRef.current?.flyTo({ center: [locationResult.lng, locationResult.lat], zoom: 13.8 })
     } catch {
@@ -299,6 +762,14 @@ function App() {
   const filteredCategories = categoryOptions.filter((categoryName) => {
     return categoryName.toLowerCase().includes(searchValue.toLowerCase().trim())
   })
+
+  const pickPresenceIcon = (iconName) => {
+    setSelectedPresenceIcon(iconName)
+    setIconMenuState((previousState) => ({
+      ...previousState,
+      open: false
+    }))
+  }
 
   return (
     <>
@@ -316,6 +787,8 @@ function App() {
             <MaterialSymbol name="search" />
           </button>
         </div>
+
+        {eventsLoadError && <p className="events-load-error">{eventsLoadError}</p>}
 
         <div className={`chips-row ${areChipsCollapsed ? 'is-collapsed' : ''}`}>
           {filteredCategories.map((categoryName) => {
@@ -376,13 +849,44 @@ function App() {
               ))}
             </select>
 
-            <input
-              value={formValues.location}
-              onChange={(eventTarget) => onChangeField('location', eventTarget.target.value)}
-              className="text-input"
-              placeholder="Location"
-              required
-            />
+            <div className="location-search">
+              <SearchBox
+                accessToken={accessToken}
+                value={formValues.location}
+                proximity={defaultCenter}
+                placeholder="Location"
+                onChange={(value) => {
+                  onChangeField('location', value)
+                  setSelectedLocationCoordinates(null)
+                }}
+                onRetrieve={(result) => {
+                  const topFeature = result?.features?.[0] || null
+
+                  if (!topFeature) {
+                    return
+                  }
+
+                  const center = topFeature.center || topFeature.geometry?.coordinates
+                  const placeName =
+                    topFeature.place_name ||
+                    topFeature.properties?.full_address ||
+                    topFeature.properties?.name_preferred ||
+                    topFeature.text ||
+                    formValues.location
+
+                  if (Array.isArray(center) && center.length >= 2) {
+                    setSelectedLocationCoordinates({
+                      lng: center[0],
+                      lat: center[1]
+                    })
+                  }
+
+                  if (typeof placeName === 'string') {
+                    onChangeField('location', placeName)
+                  }
+                }}
+              />
+            </div>
 
             <div className="date-time-row">
               <input
@@ -483,6 +987,28 @@ function App() {
           </button>
         </div>
       </section>
+
+      {presenceHint.visible && (
+        <div className="presence-hint-tooltip" style={{ left: presenceHint.x, top: presenceHint.y }}>
+          {presenceHint.text}
+        </div>
+      )}
+
+      {iconMenuState.open && (
+        <div className="presence-icon-menu" ref={iconMenuRef} style={{ left: iconMenuState.x, top: iconMenuState.y }}>
+          {presenceIconOptions.map((iconName) => (
+            <button
+              key={iconName}
+              type="button"
+              className={`presence-menu-item ${selectedPresenceIcon === iconName ? 'is-active' : ''}`}
+              onClick={() => pickPresenceIcon(iconName)}
+            >
+              <MaterialSymbol name={iconName} className="presence-menu-icon" />
+              {iconName}
+            </button>
+          ))}
+        </div>
+      )}
     </>
   )
 }

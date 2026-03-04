@@ -68,6 +68,12 @@
   cursor: pointer;
 }
 
+.events-load-error {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #fff;
+}
+
 .chips-row {
   display: flex;
   flex-wrap: wrap;
@@ -174,6 +180,14 @@
 .description-input {
   min-height: 92px;
   resize: vertical;
+}
+
+.location-search {
+  width: 100%;
+}
+
+.location-search .mapboxsearch {
+  width: 100%;
 }
 
 .date-time-row {
@@ -323,13 +337,14 @@
   border-radius: 999px;
   background: #ff8400;
   color: #fff;
-  padding: 12px 24px;
+  padding: 0;
   cursor: pointer;
-  font-size: 24px;
+  font-size: 16px;
   line-height: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.22);
 }
 
 .event-marker.is-selected {
@@ -337,8 +352,16 @@
 }
 
 .event-marker-icon {
-  transform: translateY(1px);
-  font-size: 46px;
+  transform: translateY(0.5px);
+}
+
+.event-cluster-marker {
+  background: #49454f;
+}
+
+.event-cluster-count {
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .event-popup {
@@ -354,6 +377,77 @@
 
 .event-popup p {
   margin: 0;
+}
+
+.presence-marker {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  border: 2px solid rgba(255, 255, 255, 0.9);
+}
+
+.presence-marker.is-self {
+  outline: 2px solid #1d1b20;
+  outline-offset: 1px;
+}
+
+.presence-marker-icon {
+  font-size: 14px;
+  transform: translateY(0.5px);
+}
+
+.presence-hint-tooltip {
+  position: fixed;
+  transform: translate(-50%, -100%);
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(29, 27, 32, 0.92);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.2;
+  pointer-events: none;
+  z-index: 20;
+  white-space: nowrap;
+}
+
+.presence-icon-menu {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  min-width: 130px;
+  padding: 6px;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.24);
+  transform: translate(8px, 8px);
+  z-index: 25;
+}
+
+.presence-menu-item {
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #1d1b20;
+  text-transform: capitalize;
+}
+
+.presence-menu-item:hover,
+.presence-menu-item.is-active {
+  background: #fff1e0;
+}
+
+.presence-menu-icon {
+  font-size: 18px;
 }
 
 @media (max-width: 900px) {
