@@ -1,37 +1,54 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { startTransition, useActionState, useEffect, useMemo, useRef, useState } from 'react'
 import mapboxgl from 'mapbox-gl'
 import PartySocket from 'partysocket'
 import { SearchBox } from '@mapbox/search-js-react'
 import { MaterialSymbol } from './components/MaterialSymbol'
+import ErrorBoundary from './components/ErrorBoundary'
+import {
+  createEventInGraphqlAction,
+  fetchEventsFromGraphqlAction,
+  geocodeLocationAction,
+  uploadCoverPictureToCloudinaryAction
+} from './server-actions/events'
 
 import 'mapbox-gl/dist/mapbox-gl.css'
 import './App.css'
 
 const accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN
 const partykitHost = import.meta.env.VITE_PARTYKIT_HOST || 'localhost:1999'
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000'
 const defaultCenter = [-117.9143, 33.8353]
 
 const categoryOptions = [
-  'Free Community Events',
-  'Service Opportunities',
-  'Language Tutorial',
-  'Self-Reliance Programs',
+  'FreeCommunityEvents',
+  'ServiceOpportunities',
+  'LanguageTutorial',
+  'Self_ReliancePrograms',
   'Sports',
-  'Youth Activities',
-  'Young Single Adults (18-35)',
-  'Single Adults (36+)'
+  'YouthActivities',
+  'YoungSingleAdults_18_35_',
+  'SingleAdults_36__'
 ]
+
+const categoryLabelMap = {
+  FreeCommunityEvents: 'Free Community Events',
+  ServiceOpportunities: 'Service Opportunities',
+  LanguageTutorial: 'Language Tutorial',
+  Self_ReliancePrograms: 'Self-Reliance Programs',
+  Sports: 'Sports',
+  YouthActivities: 'Youth Activities',
+  YoungSingleAdults_18_35_: 'Young Single Adults (18-35)',
+  SingleAdults_36__: 'Single Adults (36+)'
+}
 
 const categoryIconMap = {
   Sports: 'sports_soccer',
-  'Youth Activities': 'family_star',
-  'Service Opportunities': 'front_hand',
-  'Language Tutorial': 'language',
-  'Self-Reliance Programs': 'chat_bubble',
-  'Young Single Adults (18-35)': 'celebration',
-  'Single Adults (36+)': 'stars',
-  'Free Community Events': 'groups'
+  YouthActivities: 'family_star',
+  ServiceOpportunities: 'front_hand',
+  LanguageTutorial: 'language',
+  Self_ReliancePrograms: 'chat_bubble',
+  YoungSingleAdults_18_35_: 'celebration',
+  SingleAdults_36__: 'stars',
+  FreeCommunityEvents: 'groups'
 }
 
 const minMarkerSize = 16
@@ -54,56 +71,6 @@ const emptyForm = {
   contactPhone: '',
   contactEmail: '',
   coverPicture: ''
-}
-
-const fetchEventsFromApi = async () => {
-  const response = await fetch(`${apiBaseUrl}/events`)
-
-  if (!response.ok) {
-    throw new Error('Unable to load events from database')
-  }
-
-  const payload = await response.json()
-  return Array.isArray(payload) ? payload : []
-}
-
-const createEventInApi = async (eventPayload) => {
-  const response = await fetch(`${apiBaseUrl}/events`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(eventPayload)
-  })
-
-  if (!response.ok) {
-    throw new Error('Unable to save event to database')
-  }
-
-  return response.json()
-}
-
-const geocodeLocation = async (query) => {
-  const encodedQuery = encodeURIComponent(query)
-  const endpoint = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodedQuery}.json?limit=1&access_token=${accessToken}`
-  const response = await fetch(endpoint)
-
-  if (!response.ok) {
-    throw new Error('Unable to resolve location')
-  }
-
-  const geocodingData = await response.json()
-  const topResult = geocodingData?.features?.[0]
-
-  if (!topResult || !Array.isArray(topResult.center)) {
-    return null
-  }
-
-  return {
-    lng: topResult.center[0],
-    lat: topResult.center[1],
-    displayName: topResult.place_name || query
-  }
 }
 
 const clamp = (value, min, max) => {
@@ -176,6 +143,19 @@ const getFallbackColorForParticipant = (participantId) => {
   return fallbackPresenceColors[Math.abs(hash) % fallbackPresenceColors.length]
 }
 
+const readFileAsDataUrl = (file) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      resolve(typeof reader.result === 'string' ? reader.result : '')
+    }
+    reader.onerror = () => {
+      reject(new Error('Unable to read selected image file'))
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
 function App() {
   const mapRef = useRef(null)
   const markersRef = useRef([])
@@ -191,7 +171,6 @@ function App() {
   const [searchValue, setSearchValue] = useState('')
   const [activeCategory, setActiveCategory] = useState(null)
   const [events, setEvents] = useState([])
-  const [eventsLoadError, setEventsLoadError] = useState('')
   const [participants, setParticipants] = useState([])
   const [selfParticipantId, setSelfParticipantId] = useState(null)
   const [selectedPresenceIcon, setSelectedPresenceIcon] = useState('person')
@@ -199,10 +178,65 @@ function App() {
   const [iconMenuState, setIconMenuState] = useState({ open: false, x: 0, y: 0 })
   const [selectedEventId, setSelectedEventId] = useState(null)
   const [isFormOpen, setIsFormOpen] = useState(false)
-  const [isSubmitting, setIsSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
+  const [isCoverUploading, setIsCoverUploading] = useState(false)
   const [formValues, setFormValues] = useState(emptyForm)
   const [selectedLocationCoordinates, setSelectedLocationCoordinates] = useState(null)
+
+  const [eventActionState, submitEventAction, isSubmitting] = useActionState(
+    async (_previousState, payload) => {
+      try {
+        const { formValues: submittedValues, selectedCoordinates } = payload || {}
+
+        if (!submittedValues?.name?.trim() || !submittedValues?.location?.trim()) {
+          return {
+            status: 'error',
+            error: 'Event name and location are required.'
+          }
+        }
+
+        const locationResult = selectedCoordinates
+          ? {
+              lng: selectedCoordinates.lng,
+              lat: selectedCoordinates.lat,
+              displayName: submittedValues.location
+            }
+          : await geocodeLocationAction(submittedValues.location)
+
+        if (!locationResult) {
+          return {
+            status: 'error',
+            error: 'Could not find that location. Please use a more specific address.'
+          }
+        }
+
+        const createdEvent = await createEventInGraphqlAction({
+          ...submittedValues,
+          location: locationResult.displayName,
+          lng: locationResult.lng,
+          lat: locationResult.lat
+        })
+
+        return {
+          status: 'success',
+          createdEvent,
+          flyTo: {
+            lng: locationResult.lng,
+            lat: locationResult.lat
+          }
+        }
+      } catch (error) {
+        return {
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Unable to add event right now. Please try again.'
+        }
+      }
+    },
+    {
+      status: 'idle',
+      error: ''
+    }
+  )
 
   const selectedEvent = useMemo(() => {
     return events.find((eventItem) => eventItem.id === selectedEventId) || null
@@ -261,30 +295,6 @@ function App() {
       setSelectedEventId(null)
     }
   }, [selectedEventId, visibleEvents])
-
-  useEffect(() => {
-    let isCancelled = false
-
-    const loadEvents = async () => {
-      try {
-        const storedEvents = await fetchEventsFromApi()
-        if (!isCancelled) {
-          setEvents(storedEvents)
-          setEventsLoadError('')
-        }
-      } catch {
-        if (!isCancelled) {
-          setEventsLoadError('Unable to load events from MongoDB right now.')
-        }
-      }
-    }
-
-    loadEvents()
-
-    return () => {
-      isCancelled = true
-    }
-  }, [])
 
   useEffect(() => {
     mapboxgl.accessToken = accessToken
@@ -429,6 +439,52 @@ function App() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    let isCancelled = false
+
+    const loadEvents = async () => {
+      try {
+        const remoteEvents = await fetchEventsFromGraphqlAction(activeCategory)
+        if (!isCancelled) {
+          setEvents(remoteEvents)
+        }
+      } catch {
+        if (!isCancelled) {
+          setFormError('Unable to load events from server right now.')
+        }
+      }
+    }
+
+    loadEvents()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [activeCategory])
+
+  useEffect(() => {
+    if (eventActionState.status === 'error') {
+      setFormError(eventActionState.error || 'Unable to add event right now. Please try again.')
+      return
+    }
+
+    if (eventActionState.status === 'success' && eventActionState.createdEvent) {
+      setFormError('')
+      setEvents((previousEvents) => [...previousEvents, eventActionState.createdEvent])
+      setSelectedEventId(eventActionState.createdEvent.id)
+      setIsFormOpen(false)
+      setFormValues(emptyForm)
+      setSelectedLocationCoordinates(null)
+      setSearchValue('')
+      setActiveCategory(eventActionState.createdEvent.category)
+
+      mapRef.current?.flyTo({
+        center: [eventActionState.flyTo.lng, eventActionState.flyTo.lat],
+        zoom: 13.8
+      })
+    }
+  }, [eventActionState])
 
   useEffect(() => {
     if (!presenceSocketRef.current || presenceSocketRef.current.readyState !== WebSocket.OPEN) {
@@ -665,18 +721,26 @@ function App() {
     }))
   }
 
-  const onCoverFileChange = (eventTarget) => {
+  const onCoverFileChange = async (eventTarget) => {
     const file = eventTarget.target.files?.[0]
 
     if (!file) {
       return
     }
 
-    const reader = new FileReader()
-    reader.onload = () => {
-      onChangeField('coverPicture', typeof reader.result === 'string' ? reader.result : '')
+    setFormError('')
+    setIsCoverUploading(true)
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file)
+      const uploadedImageUrl = await uploadCoverPictureToCloudinaryAction(dataUrl)
+      onChangeField('coverPicture', uploadedImageUrl)
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'Unable to upload cover picture right now.')
+    } finally {
+      setIsCoverUploading(false)
+      eventTarget.target.value = ''
     }
-    reader.readAsDataURL(file)
   }
 
   const openForm = () => {
@@ -695,13 +759,13 @@ function App() {
     setSelectedEventId(null)
   }
 
-  const toggleCategory = (categoryName) => {
+  const toggleCategory = (categoryValue) => {
     setActiveCategory((previousCategory) => {
-      if (previousCategory === categoryName) {
+      if (previousCategory === categoryValue) {
         return null
       }
 
-      return categoryName
+      return categoryValue
     })
   }
 
@@ -709,58 +773,20 @@ function App() {
     setActiveCategory(null)
   }
 
-  const onSubmitEvent = async (eventTarget) => {
+  const onSubmitEvent = (eventTarget) => {
     eventTarget.preventDefault()
     setFormError('')
-
-    if (!formValues.name.trim() || !formValues.location.trim()) {
-      setFormError('Event name and location are required.')
-      return
-    }
-
-    setIsSubmitting(true)
-
-    try {
-      const locationResult = selectedLocationCoordinates
-        ? {
-            lng: selectedLocationCoordinates.lng,
-            lat: selectedLocationCoordinates.lat,
-            displayName: formValues.location
-          }
-        : await geocodeLocation(formValues.location)
-
-      if (!locationResult) {
-        setFormError('Could not find that location. Please use a more specific address.')
-        return
-      }
-
-      const newEvent = {
-        ...formValues,
-        location: locationResult.displayName,
-        lng: locationResult.lng,
-        lat: locationResult.lat
-      }
-
-      const savedEvent = await createEventInApi(newEvent)
-
-      setEvents((previousEvents) => [...previousEvents, savedEvent])
-      setSelectedEventId(savedEvent.id)
-      setIsFormOpen(false)
-      setFormValues(emptyForm)
-      setSelectedLocationCoordinates(null)
-      setSearchValue('')
-      setActiveCategory(savedEvent.category)
-
-      mapRef.current?.flyTo({ center: [locationResult.lng, locationResult.lat], zoom: 13.8 })
-    } catch {
-      setFormError('Unable to add event right now. Please try again.')
-    } finally {
-      setIsSubmitting(false)
-    }
+    startTransition(() => {
+      submitEventAction({
+        formValues,
+        selectedCoordinates: selectedLocationCoordinates
+      })
+    })
   }
 
-  const filteredCategories = categoryOptions.filter((categoryName) => {
-    return categoryName.toLowerCase().includes(searchValue.toLowerCase().trim())
+  const filteredCategories = categoryOptions.filter((categoryValue) => {
+    const categoryLabel = categoryLabelMap[categoryValue] || categoryValue
+    return categoryLabel.toLowerCase().includes(searchValue.toLowerCase().trim())
   })
 
   const pickPresenceIcon = (iconName) => {
@@ -788,20 +814,19 @@ function App() {
           </button>
         </div>
 
-        {eventsLoadError && <p className="events-load-error">{eventsLoadError}</p>}
-
         <div className={`chips-row ${areChipsCollapsed ? 'is-collapsed' : ''}`}>
-          {filteredCategories.map((categoryName) => {
-            const isActive = activeCategory ? activeCategory === categoryName : true
+          {filteredCategories.map((categoryValue) => {
+            const isActive = activeCategory ? activeCategory === categoryValue : true
+            const categoryLabel = categoryLabelMap[categoryValue] || categoryValue
             return (
               <button
-                key={categoryName}
+                key={categoryValue}
                 className={`chip ${isActive ? 'is-primary' : ''}`}
                 type="button"
-                onClick={() => toggleCategory(categoryName)}
+                onClick={() => toggleCategory(categoryValue)}
               >
-                <MaterialSymbol name={categoryIconMap[categoryName] || 'location_on'} className="chip-icon" />
-                {categoryName}
+                <MaterialSymbol name={categoryIconMap[categoryValue] || 'location_on'} className="chip-icon" />
+                {categoryLabel}
               </button>
             )
           })}
@@ -813,125 +838,137 @@ function App() {
 
       <section className="left-panel">
         {isFormOpen && (
-          <form className="event-card event-form" onSubmit={onSubmitEvent}>
-            <label className="cover-upload" htmlFor="cover-file-input">
-              {formValues.coverPicture ? (
-                <img src={formValues.coverPicture} alt="Event cover preview" className="cover-preview" />
-              ) : (
-                <span>Upload cover picture</span>
+          <ErrorBoundary>
+            <form className="event-card event-form" onSubmit={onSubmitEvent}>
+              <label className="cover-upload" htmlFor="cover-file-input">
+                {formValues.coverPicture ? (
+                  <img src={formValues.coverPicture} alt="Event cover preview" className="cover-preview" />
+                ) : (
+                  <span>{isCoverUploading ? 'Uploading cover picture...' : 'Upload cover picture'}</span>
+                )}
+              </label>
+              <input
+                id="cover-file-input"
+                type="file"
+                accept="image/*"
+                onChange={onCoverFileChange}
+                disabled={isCoverUploading || isSubmitting}
+              />
+              {isCoverUploading && <p className="cover-upload-status">Uploading cover picture…</p>}
+              {!isCoverUploading && formValues.coverPicture && (
+                <p className="cover-upload-status is-success">Upload complete</p>
               )}
-            </label>
-            <input id="cover-file-input" type="file" accept="image/*" onChange={onCoverFileChange} />
 
-            <input
-              value={formValues.name}
-              onChange={(eventTarget) => onChangeField('name', eventTarget.target.value)}
-              className="text-input"
-              placeholder="Name"
-              required
-            />
-            <textarea
-              value={formValues.description}
-              onChange={(eventTarget) => onChangeField('description', eventTarget.target.value)}
-              className="text-input description-input"
-              placeholder="Description"
-            />
-
-            <select
-              value={formValues.category}
-              onChange={(eventTarget) => onChangeField('category', eventTarget.target.value)}
-              className="text-input"
-            >
-              {categoryOptions.map((categoryName) => (
-                <option key={categoryName} value={categoryName}>
-                  {categoryName}
-                </option>
-              ))}
-            </select>
-
-            <div className="location-search">
-              <SearchBox
-                accessToken={accessToken}
-                value={formValues.location}
-                proximity={defaultCenter}
-                placeholder="Location"
-                onChange={(value) => {
-                  onChangeField('location', value)
-                  setSelectedLocationCoordinates(null)
-                }}
-                onRetrieve={(result) => {
-                  const topFeature = result?.features?.[0] || null
-
-                  if (!topFeature) {
-                    return
-                  }
-
-                  const center = topFeature.center || topFeature.geometry?.coordinates
-                  const placeName =
-                    topFeature.place_name ||
-                    topFeature.properties?.full_address ||
-                    topFeature.properties?.name_preferred ||
-                    topFeature.text ||
-                    formValues.location
-
-                  if (Array.isArray(center) && center.length >= 2) {
-                    setSelectedLocationCoordinates({
-                      lng: center[0],
-                      lat: center[1]
-                    })
-                  }
-
-                  if (typeof placeName === 'string') {
-                    onChangeField('location', placeName)
-                  }
-                }}
-              />
-            </div>
-
-            <div className="date-time-row">
               <input
-                type="date"
-                value={formValues.date}
-                onChange={(eventTarget) => onChangeField('date', eventTarget.target.value)}
+                value={formValues.name}
+                onChange={(eventTarget) => onChangeField('name', eventTarget.target.value)}
                 className="text-input"
+                placeholder="Name"
+                required
+              />
+              <textarea
+                value={formValues.description}
+                onChange={(eventTarget) => onChangeField('description', eventTarget.target.value)}
+                className="text-input description-input"
+                placeholder="Description"
+              />
+
+              <select
+                value={formValues.category}
+                onChange={(eventTarget) => onChangeField('category', eventTarget.target.value)}
+                className="text-input"
+              >
+                {categoryOptions.map((categoryValue) => (
+                  <option key={categoryValue} value={categoryValue}>
+                    {categoryLabelMap[categoryValue] || categoryValue}
+                  </option>
+                ))}
+              </select>
+
+              <div className="location-search">
+                <SearchBox
+                  accessToken={accessToken}
+                  value={formValues.location}
+                  proximity={defaultCenter}
+                  placeholder="Location"
+                  onChange={(value) => {
+                    onChangeField('location', value)
+                    setSelectedLocationCoordinates(null)
+                  }}
+                  onRetrieve={(result) => {
+                    const topFeature = result?.features?.[0] || null
+
+                    if (!topFeature) {
+                      return
+                    }
+
+                    const center = topFeature.center || topFeature.geometry?.coordinates
+                    const placeName =
+                      topFeature.place_name ||
+                      topFeature.properties?.full_address ||
+                      topFeature.properties?.name_preferred ||
+                      topFeature.text ||
+                      formValues.location
+
+                    if (Array.isArray(center) && center.length >= 2) {
+                      setSelectedLocationCoordinates({
+                        lng: center[0],
+                        lat: center[1]
+                      })
+                    }
+
+                    if (typeof placeName === 'string') {
+                      onChangeField('location', placeName)
+                    }
+                  }}
+                />
+              </div>
+
+              <div className="date-time-row">
+                <input
+                  type="date"
+                  value={formValues.date}
+                  onChange={(eventTarget) => onChangeField('date', eventTarget.target.value)}
+                  className="text-input"
+                />
+                <input
+                  type="time"
+                  value={formValues.time}
+                  onChange={(eventTarget) => onChangeField('time', eventTarget.target.value)}
+                  className="text-input"
+                />
+              </div>
+
+              <select
+                value={formValues.visibility}
+                onChange={(eventTarget) => onChangeField('visibility', eventTarget.target.value)}
+                className="text-input"
+              >
+                <option value="Public">Public</option>
+                <option value="Private (Invite Only)">Private (Invite Only)</option>
+              </select>
+
+              <input
+                value={formValues.contactPhone}
+                onChange={(eventTarget) => onChangeField('contactPhone', eventTarget.target.value)}
+                className="text-input"
+                placeholder="Contact phone"
               />
               <input
-                type="time"
-                value={formValues.time}
-                onChange={(eventTarget) => onChangeField('time', eventTarget.target.value)}
+                type="email"
+                value={formValues.contactEmail}
+                onChange={(eventTarget) => onChangeField('contactEmail', eventTarget.target.value)}
                 className="text-input"
+                placeholder="Contact email"
               />
-            </div>
 
-            <select
-              value={formValues.visibility}
-              onChange={(eventTarget) => onChangeField('visibility', eventTarget.target.value)}
-              className="text-input"
-            >
-              <option value="Public">Public</option>
-              <option value="Private (Invite Only)">Private (Invite Only)</option>
-            </select>
+              {formError && <p className="form-error">{formError}</p>}
 
-            <input
-              value={formValues.contactPhone}
-              onChange={(eventTarget) => onChangeField('contactPhone', eventTarget.target.value)}
-              className="text-input"
-              placeholder="Contact phone"
-            />
-            <input
-              type="email"
-              value={formValues.contactEmail}
-              onChange={(eventTarget) => onChangeField('contactEmail', eventTarget.target.value)}
-              className="text-input"
-              placeholder="Contact email"
-            />
-
-            {formError && <p className="form-error">{formError}</p>}
-
-            <button className="submit-button" type="submit" disabled={isSubmitting}>
-              {isSubmitting ? 'Adding event...' : 'Add Event'}
-            </button>
-          </form>
+              <button className="submit-button" type="submit" disabled={isSubmitting || isCoverUploading}>
+                {isCoverUploading ? 'Uploading cover...' : isSubmitting ? 'Adding event...' : 'Add Event'}
+              </button>
+            </form>
+          </ErrorBoundary>
         )}
 
         {!isFormOpen && selectedEvent && (
@@ -951,7 +988,7 @@ function App() {
                 </button>
               </div>
               <h2>{selectedEvent.name}</h2>
-              <p className="subtitle">{selectedEvent.category}</p>
+              <p className="subtitle">{categoryLabelMap[selectedEvent.category] || selectedEvent.category}</p>
               <p>{selectedEvent.description || 'No description provided.'}</p>
               <p>Location: {selectedEvent.location}</p>
               <p>

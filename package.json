@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "vite --port 9000",
     "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "eslint .",
     "preview": "vite preview",
-    "api:dev": "node api-server/index.js",
     "mcp:figma-make": "node mcp-server/index.js",
     "mcp:figma-make:http": "node mcp-server/http.js",
     "party:dev": "partykit dev",
@@ -17,11 +18,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.2",
     "@mapbox/search-js-react": "^1.5.1",
-    "cors": "^2.8.5",
-    "dotenv": "^16.6.1",
-    "express": "^4.21.2",
     "mapbox-gl": "^3.17.0",
-    "mongodb": "^6.20.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "zod": "^3.25.76",
@@ -36,6 +33,7 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.25",
     "globals": "^16.5.0",
+    "vitest": "^3.2.4",
     "vite": "^7.2.7",
     "partykit": "0.0.115"
   }

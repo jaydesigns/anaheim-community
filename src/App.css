@@ -68,12 +68,6 @@
   cursor: pointer;
 }
 
-.events-load-error {
-  margin: 0 0 10px;
-  font-size: 12px;
-  color: #fff;
-}
-
 .chips-row {
   display: flex;
   flex-wrap: wrap;
@@ -143,6 +137,11 @@
   padding: 12px;
   max-height: calc(100vh - 210px);
   overflow: auto;
+}
+
+.event-form-error-state {
+  align-items: flex-start;
+  justify-content: center;
 }
 
 .event-form input[type='file'] {
@@ -219,6 +218,17 @@
   margin: 0;
   color: #b00020;
   font-size: 13px;
+}
+
+.cover-upload-status {
+  margin: 0;
+  font-size: 12px;
+  color: #49454f;
+}
+
+.cover-upload-status.is-success {
+  color: #1b5e20;
+  font-weight: 600;
 }
 
 .card-content {
