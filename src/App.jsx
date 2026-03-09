@@ -167,6 +167,7 @@ function App() {
   const lastPresencePointRef = useRef({ lng: defaultCenter[0], lat: defaultCenter[1] })
   const lastPresenceSentAtRef = useRef(0)
   const mapContainerRef = useRef(null)
+  const topSidebarRef = useRef(null)
 
   const [searchValue, setSearchValue] = useState('')
   const [activeCategory, setActiveCategory] = useState(null)
@@ -182,6 +183,7 @@ function App() {
   const [isCoverUploading, setIsCoverUploading] = useState(false)
   const [formValues, setFormValues] = useState(emptyForm)
   const [selectedLocationCoordinates, setSelectedLocationCoordinates] = useState(null)
+  const [isCategoryFiltersOpen, setIsCategoryFiltersOpen] = useState(false)
 
   const [eventActionState, submitEventAction, isSubmitting] = useActionState(
     async (_previousState, payload) => {
@@ -262,7 +264,7 @@ function App() {
     })
   }, [events, activeCategory, searchValue])
 
-  const areChipsCollapsed = isFormOpen || Boolean(selectedEvent)
+  const areChipsCollapsed = isFormOpen || Boolean(selectedEvent) || !isCategoryFiltersOpen
 
   useEffect(() => {
     selectedPresenceIconRef.current = selectedPresenceIcon
@@ -289,6 +291,25 @@ function App() {
       window.removeEventListener('pointerdown', onPointerDown)
     }
   }, [iconMenuState.open])
+
+  useEffect(() => {
+    if (areChipsCollapsed) {
+      return
+    }
+
+    const onPointerDown = (eventTarget) => {
+      if (topSidebarRef.current?.contains(eventTarget.target)) {
+        return
+      }
+
+      setIsCategoryFiltersOpen(false)
+    }
+
+    window.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [areChipsCollapsed])
 
   useEffect(() => {
     if (selectedEventId && !visibleEvents.some((eventItem) => eventItem.id === selectedEventId)) {
@@ -801,27 +822,38 @@ function App() {
     <>
       <div id="map-container" ref={mapContainerRef} />
 
-      <aside className="top-sidebar">
-        <div className="search-row">
-          <input
-            className="search-input"
-            placeholder="Search events or categories"
-            value={searchValue}
-            onChange={(eventTarget) => setSearchValue(eventTarget.target.value)}
-          />
-          <button className="search-icon" type="button" aria-label="Search categories">
-            <MaterialSymbol name="search" />
+      <aside className={`top-sidebar h-fit transition-all rounded-3xl`} ref={topSidebarRef}>
+        <div className='flex p-0'>
+          <button
+            type="button"
+            className="filter-toggle-button"
+            aria-label="Toggle category filters"
+            aria-expanded={!areChipsCollapsed}
+            onClick={() => setIsCategoryFiltersOpen((previousState) => !previousState)}
+          >
+            <MaterialSymbol name="tune" />
           </button>
+          <div className="search-row w-full">
+            <input
+              className="search-input font-semibold"
+              placeholder="Search events or categories"
+              value={searchValue}
+              onChange={(eventTarget) => setSearchValue(eventTarget.target.value)}
+            />
+            <button className="search-icon" type="button" aria-label="Search categories">
+              <MaterialSymbol name="search" />
+            </button>
+          </div>
         </div>
 
-        <div className={`chips-row ${areChipsCollapsed ? 'is-collapsed' : ''}`}>
+        <div className={`chips-row ${areChipsCollapsed ? 'is-collapsed h-0' : 'h-fit'} transition-all`}>
           {filteredCategories.map((categoryValue) => {
             const isActive = activeCategory ? activeCategory === categoryValue : true
             const categoryLabel = categoryLabelMap[categoryValue] || categoryValue
             return (
               <button
                 key={categoryValue}
-                className={`chip ${isActive ? 'is-primary' : ''}`}
+                className={`chip ${isActive ? 'is-primary' : ''} text-xs`}
                 type="button"
                 onClick={() => toggleCategory(categoryValue)}
               >
@@ -840,7 +872,7 @@ function App() {
         {isFormOpen && (
           <ErrorBoundary>
             <form className="event-card event-form" onSubmit={onSubmitEvent}>
-              <label className="cover-upload" htmlFor="cover-file-input">
+              <label className="cover-upload min-h-24" htmlFor="cover-file-input">
                 {formValues.coverPicture ? (
                   <img src={formValues.coverPicture} alt="Event cover preview" className="cover-preview" />
                 ) : (

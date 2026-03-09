@@ -6,6 +6,8 @@ This is supporting code for the Mapbox tutorial [Use Mapbox GL JS in an React ap
 
 This tutorial walks through how to setup [Mapbox GL JS](https://docs.mapbox.com/mapbox-gl-js/) in an [React](https://react.dev) project.  
 
+Styling is configured with [Tailwind CSS](https://tailwindcss.com/) using the official Vite plugin.
+
 
 You'll learn how to:
 - Setup a Vite JS app to use React
